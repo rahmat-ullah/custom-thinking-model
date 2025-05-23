@@ -8,8 +8,9 @@ import config
 from utils import save_chat_history, load_chat_history
 import audio_utils
 import email_utils # Gmail integration
-from voice_email_handler import VoiceEmailHandler # Add this import
-import os # ensure os is imported
+from outlook_utils import OutlookService # Outlook integration
+from voice_email_handler import VoiceEmailHandler
+import os
 
 # Set page configuration
 st.set_page_config(
@@ -34,7 +35,15 @@ if "emails_list" not in st.session_state: # List of emails
 if "selected_email" not in st.session_state: # Currently selected email to read
     st.session_state.selected_email = None
 if "voice_email_handler" not in st.session_state:
-    st.session_state.voice_email_handler = None # Will be initialized once gmail_service is available
+    st.session_state.voice_email_handler = None
+if "outlook_service" not in st.session_state: # Outlook service
+    st.session_state.outlook_service = None
+if "outlook_auth_flow_details" not in st.session_state: # For Outlook device flow
+    st.session_state.outlook_auth_flow_details = None
+if "outlook_auth_pending" not in st.session_state: # To manage Outlook auth button state
+    st.session_state.outlook_auth_pending = False
+
+
 if "waiting_for_reply_body" not in st.session_state: # For multi-turn reply (voice)
    st.session_state.waiting_for_reply_body = False
 if "waiting_for_text_reply_body" not in st.session_state: # For multi-turn reply (text)
@@ -132,23 +141,22 @@ def process_voice_command(recognized_text: str):
     if any(phrase in text_lower for phrase in stop_phrases):
         if st.session_state.get("continuous_listening_mode", False):
             st.session_state.continuous_listening_mode = False
-            st.session_state.needs_auto_listen = False # Cancel any pending auto-listen
+            st.session_state.needs_auto_listen = False 
             confirmation_message = "Continuous listening disabled."
             audio_utils.speak_text(confirmation_message, voice_id=st.session_state.get("selected_tts_voice", "alloy"))
-            # Update UI if needed, e.g., by clearing user_input or adding to chat
-            st.session_state.user_input = "" # Clear any partial input that might have been the stop command
-            # Add to direct chat for visual confirmation
-            st.session_state.direct_chat.add_message("user", recognized_text) # Show the stop command
+            st.session_state.user_input = "" 
+            st.session_state.direct_chat.add_message("user", recognized_text) 
             st.session_state.direct_chat.add_message("assistant", confirmation_message)
-            st.rerun() # Rerun to update UI, especially the checkbox
-            return # Stop further processing
+            st.rerun() 
+            return 
         else:
-            # If not in continuous mode, "stop listening" might be a general query
-            pass # Let it be processed as a normal command
+            pass 
 
     handler = st.session_state.get("voice_email_handler")
     response_text = None
     email_command_handled = False
+    active_service_name_for_voice_command = handler._get_active_service_name() if handler else "No service"
+
 
     WORD_TO_DIGIT = {
         "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
@@ -157,15 +165,31 @@ def process_voice_command(recognized_text: str):
         "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10"
     }
 
+    # Handle service switching commands first
+    if "switch to gmail" in text_lower or "use gmail" in text_lower:
+        if handler:
+            response_text = handler.switch_email_service('gmail')
+        else:
+            response_text = "Email handler not initialized. Please connect to a service first."
+        email_command_handled = True
+    elif "switch to outlook" in text_lower or "use outlook" in text_lower:
+        if handler:
+            if st.session_state.get("outlook_service"):
+                response_text = handler.switch_email_service('outlook')
+            else:
+                response_text = "Outlook service not connected. Please connect to Outlook first using the button."
+        else:
+            response_text = "Email handler not initialized. Please connect to a service first."
+        email_command_handled = True
     # Check if waiting for reply body
-    if st.session_state.get("waiting_for_reply_body", False) and handler and handler.current_email_id:
-        st.session_state.waiting_for_reply_body = False # Reset flag
-        response_text = handler.prepare_reply_voice(recognized_text) # Entire input is reply body
+    elif st.session_state.get("waiting_for_reply_body", False) and handler and handler.current_email_id:
+        st.session_state.waiting_for_reply_body = False 
+        response_text = handler.send_reply_voice(recognized_text) # Use send_reply_voice
         email_command_handled = True
     # Email-related command intent recognition
-    elif handler: # Only if Gmail is connected and handler initialized
+    elif handler and handler.active_service_client: # Check if a service is active in the handler
         if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email", "get my last email"]):
-            max_results = 5 # Default
+            max_results = 5 
             words = text_lower.split()
             for i, word in enumerate(words):
                 if word.isdigit():
@@ -207,32 +231,50 @@ def process_voice_command(recognized_text: str):
                 identifier = " ".join(processed_identifier_words) # Use the (potentially modified) full string
 
             # Fallback for "subject" or "from" if no numeric identifier was prioritized
-            if not identifier or not any(char.isdigit() for char in identifier): # if identifier is not primarily numeric
+            if not identifier or not any(char.isdigit() for char in identifier): 
                 if "subject" in identifier_part:
                      identifier = identifier_part.split("subject",1)[-1].strip()
                 elif "from" in identifier_part:
                      identifier = identifier_part.split("from",1)[-1].strip()
-                elif not identifier_part: # "read email" without anything after
-                    identifier = "" # Will trigger the "Please specify" message
+                elif not identifier_part: 
+                    identifier = "" 
 
             if identifier:
-                response_text = handler.read_email_voice(identifier) # identifier can be a number string or other text
+                response_text = handler.read_email_voice(identifier) 
             else:
-                response_text = "Please specify which email to read, for example, 'read email number one' or 'read email from Jane'."
+                response_text = f"Please specify which {active_service_name_for_voice_command} email to read, for example, 'read email number one' or 'read email from Jane'."
             email_command_handled = True
         elif "reply to this email" in text_lower or "reply email" in text_lower:
             if handler.current_email_id:
-                response_text = "What would you like to say in your reply?"
-                st.session_state.waiting_for_reply_body = True # Set flag
+                response_text = f"What would you like to say in your reply using {active_service_name_for_voice_command}?"
+                st.session_state.waiting_for_reply_body = True 
             else:
-                response_text = "Please read an email first before replying."
+                response_text = f"Please read an {active_service_name_for_voice_command} email first before replying."
             email_command_handled = True
-        # No "send reply saying" - handled by waiting_for_reply_body state
+        # Add mark as read/unread commands
+        elif "mark as read" in text_lower:
+            identifier_part = text_lower.split("mark as read", 1)[-1].strip()
+            if identifier_part:
+                 response_text = handler.mark_email_as_read_voice(identifier_part)
+            else:
+                 response_text = "Please specify which email to mark as read."
+            email_command_handled = True
+        elif "mark as unread" in text_lower:
+            identifier_part = text_lower.split("mark as unread", 1)[-1].strip()
+            if identifier_part:
+                 response_text = handler.mark_email_as_unread_voice(identifier_part)
+            else:
+                 response_text = "Please specify which email to mark as unread."
+            email_command_handled = True
 
-    elif not handler and any(keyword in text_lower for keyword in ["email", "mail", "message", "inbox", "unread", "reply"]):
-        # Email command attempted but Gmail not connected
-        response_text = "To use email commands, please first connect to Gmail using the button in the user interface."
-        email_command_handled = True # Handled by informing the user
+
+    elif not handler and any(keyword in text_lower for keyword in ["email", "mail", "message", "inbox", "unread", "reply", "outlook", "gmail"]):
+        response_text = "To use email commands, please first connect to an email service using the buttons in the sidebar."
+        email_command_handled = True 
+    elif handler and not handler.active_service_client and any(keyword in text_lower for keyword in ["email", "mail", "message", "inbox", "unread", "reply"]):
+        response_text = "No email service is currently active. You can say 'switch to Gmail' or 'switch to Outlook' if they are connected."
+        email_command_handled = True
+
 
     speech_was_made_by_email_handler = False
     if email_command_handled:
@@ -250,16 +292,15 @@ def process_voice_command(recognized_text: str):
             current_logs.append(log_entry)
             save_chat_history(current_logs, config.LOG_FILE_PATH)
     else:
-        # Not an email command, or email command could not be fully processed by handler (e.g. bad parse)
+        # Not an email command, or email command could not be fully processed by handler
         # Fallback to general LLM processing for voice.
-        st.session_state.user_input = recognized_text # Show recognized text in input box
-        # General LLM processing will handle its own potential auto-listen trigger
+        st.session_state.user_input = recognized_text 
         process_general_llm_input(recognized_text, called_from_voice=True) 
     
-    # If an email command was handled and spoke, then check for continuous listening
     if speech_was_made_by_email_handler and \
        st.session_state.get("talking_mode_enabled", False) and \
-       st.session_state.get("continuous_listening_mode", False):
+       st.session_state.get("continuous_listening_mode", False) and \
+       not st.session_state.get("waiting_for_reply_body", False): # Don't auto-listen if waiting for reply
         st.session_state.needs_auto_listen = True
 
 
@@ -268,7 +309,8 @@ def process_email_command_text(text_input: str, handler: VoiceEmailHandler):
     """Processes text input for email commands."""
     text_lower = text_input.lower()
     response_text = None
-    email_command_handled = False # Flag to indicate if an email command was recognized and acted upon
+    email_command_handled = False 
+    active_service_name_for_text = handler._get_active_service_name() if handler else "No service"
 
     WORD_TO_DIGIT = {
         "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
@@ -276,30 +318,44 @@ def process_email_command_text(text_input: str, handler: VoiceEmailHandler):
         "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
         "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10"
     }
-
-    # Check if waiting for reply body (for text-based reply)
-    # This check is actually done in handle_submit before calling this function.
-    # Here, we focus on initial command processing.
-
-    if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email", "get my last email"]):
-        max_results = 5 # Default
-        words = text_lower.split()
-        for i, word in enumerate(words):
-            if word.isdigit():
-                max_results = int(word)
-                break
-            if word in ["emails", "email"] and i > 0 and words[i-1].isdigit():
-                max_results = int(words[i-1])
-                break
-            if word in ["emails", "email"] and i > 0 and words[i-1] in WORD_TO_DIGIT:
-                max_results = int(WORD_TO_DIGIT[words[i-1]])
-                break
-        response_text = handler.fetch_unread_emails_voice(max_results=max_results) # Reuses voice method, which is fine as it returns text
+    
+    # Service switching via text
+    if "switch to gmail" in text_lower or "use gmail" in text_lower:
+        if handler:
+            response_text = handler.switch_email_service('gmail')
+        else:
+            response_text = "Email handler not initialized."
         email_command_handled = True
-    elif "read email" in text_lower or "open email" in text_lower:
-        identifier_part = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
-        identifier = None
-        words = identifier_part.split()
+    elif "switch to outlook" in text_lower or "use outlook" in text_lower:
+        if handler:
+            if st.session_state.get("outlook_service"):
+                response_text = handler.switch_email_service('outlook')
+            else:
+                response_text = "Outlook service not connected. Please connect to Outlook first."
+        else:
+            response_text = "Email handler not initialized."
+        email_command_handled = True
+    # Existing email commands, now checking handler.active_service_client
+    elif handler and handler.active_service_client:
+        if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email", "get my last email"]):
+            max_results = 5 
+            words = text_lower.split()
+            for i, word in enumerate(words):
+                if word.isdigit():
+                    max_results = int(word)
+                    break
+                if word in ["emails", "email"] and i > 0 and words[i-1].isdigit():
+                    max_results = int(words[i-1])
+                    break
+                if word in ["emails", "email"] and i > 0 and words[i-1] in WORD_TO_DIGIT:
+                    max_results = int(WORD_TO_DIGIT[words[i-1]])
+                    break
+            response_text = handler.fetch_unread_emails_voice(max_results=max_results) 
+            email_command_handled = True
+        elif "read email" in text_lower or "open email" in text_lower:
+            identifier_part = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
+            identifier = None
+            words = identifier_part.split()
         processed_identifier_words = []
         found_num_word = False
         for word in words:
@@ -314,38 +370,53 @@ def process_email_command_text(text_input: str, handler: VoiceEmailHandler):
             if potential_num.isdigit() and len(potential_num) < 3:
                 identifier = potential_num
         
-        if not identifier:
-            identifier = " ".join(processed_identifier_words)
+            if not identifier:
+                identifier = " ".join(processed_identifier_words)
 
-        if not identifier or not any(char.isdigit() for char in identifier):
-            if "subject" in identifier_part:
-                 identifier = identifier_part.split("subject",1)[-1].strip()
-            elif "from" in identifier_part:
-                 identifier = identifier_part.split("from",1)[-1].strip()
-            elif not identifier_part : # "read email" without anything after
-                 identifier = "" 
+            if not identifier or not any(char.isdigit() for char in identifier):
+                if "subject" in identifier_part:
+                     identifier = identifier_part.split("subject",1)[-1].strip()
+                elif "from" in identifier_part:
+                     identifier = identifier_part.split("from",1)[-1].strip()
+                elif not identifier_part : 
+                     identifier = "" 
 
-        if identifier:
-            response_text = handler.read_email_voice(identifier) # Reuses voice method
-        else:
-            response_text = "Please specify which email to read, for example, 'read email number one' or 'read email from Jane'."
+            if identifier:
+                response_text = handler.read_email_voice(identifier) 
+            else:
+                response_text = f"Please specify which {active_service_name_for_text} email to read, for example, 'read email number one' or 'read email from Jane'."
+            email_command_handled = True
+        elif "reply to this email" in text_lower or "reply email" in text_lower:
+            if handler.current_email_id:
+                response_text = f"What would you like to say in your reply using {active_service_name_for_text}? Please type your message."
+                st.session_state.waiting_for_text_reply_body = True 
+            else:
+                response_text = f"Please read an {active_service_name_for_text} email first before replying via text."
+            email_command_handled = True
+        elif "mark as read" in text_lower:
+            identifier_part = text_lower.split("mark as read", 1)[-1].strip()
+            if identifier_part: response_text = handler.mark_email_as_read_voice(identifier_part)
+            else: response_text = "Please specify which email to mark as read."
+            email_command_handled = True
+        elif "mark as unread" in text_lower:
+            identifier_part = text_lower.split("mark as unread", 1)[-1].strip()
+            if identifier_part: response_text = handler.mark_email_as_unread_voice(identifier_part)
+            else: response_text = "Please specify which email to mark as unread."
+            email_command_handled = True
+    elif not handler and any(keyword in text_lower for keyword in ["email", "mail", "outlook", "gmail"]): # No handler, but email keyword
+        response_text = "Email services are not yet initialized. Please connect to Gmail or Outlook first."
         email_command_handled = True
-    elif "reply to this email" in text_lower or "reply email" in text_lower:
-        if handler.current_email_id:
-            response_text = "What would you like to say in your reply? Please type your message."
-            st.session_state.waiting_for_text_reply_body = True # Set flag for text reply
-            # Unlike voice, we don't immediately expect the body. Text input will trigger next.
-        else:
-            response_text = "Please read an email first before replying via text."
+    elif handler and not handler.active_service_client and any(keyword in text_lower for keyword in ["email", "mail"]): # Handler exists, but no active service
+        response_text = "No email service is currently active. You can say 'switch to Gmail' or 'switch to Outlook' if they are connected."
         email_command_handled = True
-    # No "send reply saying" for text - handled by waiting_for_text_reply_body state in handle_submit
+
 
     if email_command_handled:
         return response_text
-    return None # Return None if no specific email command was handled by this function
+    return None 
 
 
-def handle_mic_input(): # This is the main entry for voice
+def handle_mic_input(): 
     # Clicking the "Speak" button explicitly disables continuous listening for this interaction
     if st.session_state.get("continuous_listening_mode", False):
         st.session_state.continuous_listening_mode = False
@@ -367,55 +438,49 @@ def handle_mic_input(): # This is the main entry for voice
 
 
 def handle_submit(): # This is for text based submission
-    user_text_from_input_box = st.session_state.user_input 
+    user_text = st.session_state.user_input # Capture before it's potentially cleared
     
-    # If user types and submits something while continuous listening was on, disable it.
-    if user_text_from_input_box and st.session_state.get("continuous_listening_mode", False):
+    if user_text and st.session_state.get("continuous_listening_mode", False):
         st.session_state.continuous_listening_mode = False
         st.session_state.needs_auto_listen = False
-        print("Continuous listening disabled due to typing and submitting text.") # For debugging
-        # The checkbox in the sidebar will update due to st.rerun() later in this function or by process_general_llm.
-        # No audio confirmation here, as the user is typing.
-        # The submitted text (user_text_from_input_box) will be processed as usual.
-
-    if not user_text_from_input_box: # Check if after potential modifications, input is empty
+        print("Continuous listening disabled due to typing and submitting text.") 
+        
+    if not user_text: 
         return
 
     handler = st.session_state.get("voice_email_handler")
     email_response_text = None
-    email_command_processed_for_submit = False # Flag to skip general LLM if email handled
+    email_command_processed_for_submit = False 
 
     if handler:
-        # Check if waiting for the body of a text reply
+        active_service_name_for_text_submit = handler._get_active_service_name()
         if st.session_state.get("waiting_for_text_reply_body", False) and handler.current_email_id:
-            # User's current input is the reply body
-            email_response_text = handler.prepare_reply_voice(user_text) # Re-use voice version, it just returns text
-            st.session_state.waiting_for_text_reply_body = False # Reset flag
+            email_response_text = handler.send_reply_voice(user_text) # Use send_reply_voice
+            st.session_state.waiting_for_text_reply_body = False 
             email_command_processed_for_submit = True
         else:
-            # Not waiting for a reply body, so try to process as a new email command
-            # We can do a quick check for keywords to see if it *might* be an email command
-            # before calling the full process_email_command_text.
-            # This avoids calling it unnecessarily for every text input.
-            email_keywords = ["email", "mail", "unread", "fetch", "read", "open", "reply", "inbox", "message"]
+            email_keywords = ["email", "mail", "unread", "fetch", "read", "open", "reply", "inbox", "message", "outlook", "gmail", "switch"]
             if any(keyword in user_text.lower() for keyword in email_keywords):
                 email_response_text = process_email_command_text(user_text, handler)
-                if email_response_text:
-                    email_command_processed_for_submit = True
+                if email_response_text: # If it was an email command (even if it's "service not active")
+                    email_command_processed_for_submit = True 
         
         if email_command_processed_for_submit and email_response_text:
-            # Display in DirectChat (or your chosen chat display)
             st.session_state.direct_chat.add_message("user", user_text)
             st.session_state.direct_chat.add_message("assistant", email_response_text)
             speech_was_made_in_submit = False
             if st.session_state.talking_mode_enabled:
-                audio_utils.speak_text(email_response_text, voice_id=st.session_state.selected_tts_voice)
-                speech_was_made_in_submit = True
+                # Avoid speaking if it was just a "what's my reply?" prompt for text.
+                if not st.session_state.get("waiting_for_text_reply_body", False): # Check if we just SET the waiting flag
+                    audio_utils.speak_text(email_response_text, voice_id=st.session_state.selected_tts_voice)
+                    speech_was_made_in_submit = True
             
-            st.session_state.user_input = "" # Clear input box
-            if speech_was_made_in_submit and st.session_state.get("continuous_listening_mode", False):
+            st.session_state.user_input = "" 
+            if speech_was_made_in_submit and \
+               st.session_state.get("continuous_listening_mode", False) and \
+               not st.session_state.get("waiting_for_text_reply_body", False): # Don't auto-listen if now waiting for text reply
                 st.session_state.needs_auto_listen = True
-            # Log this interaction if needed (similar to how process_voice_command logs)
+            
             if config.ENABLE_LOGGING:
                 log_entry = {
                     "timestamp": datetime.now().isoformat(),
@@ -425,12 +490,11 @@ def handle_submit(): # This is for text based submission
                 current_logs = load_chat_history(config.LOG_FILE_PATH)
                 current_logs.append(log_entry)
                 save_chat_history(current_logs, config.LOG_FILE_PATH)
-            st.rerun() # Rerun to update UI immediately
-            return # Stop further processing
+            st.rerun() 
+            return 
 
-    # If not an email command handled by the above, or no handler, process as general input
     if not email_command_processed_for_submit:
-        process_general_llm_input(user_text_from_input_box, called_from_voice=False) # called_from_voice=False for text input
+        process_general_llm_input(user_text, called_from_voice=False) 
 
 def clear_chats():
     st.session_state.thinking_chat.clear_messages()
@@ -529,128 +593,153 @@ if config.ENABLE_LOGGING:
     os.makedirs(os.path.dirname(config.LOG_FILE_PATH), exist_ok=True)
 
 # --- Main script logic for auto-listening ---
-# This should be one of the last things in the script to ensure all other UI updates
-# and state changes for the current run have been processed.
 if st.session_state.get("needs_auto_listen", False):
-    # Only trigger if not already in a state that implies user is about to type/speak
-    # (e.g., waiting for reply body for voice or text)
-    # This check might be too restrictive or need refinement depending on desired UX
     if not st.session_state.get("waiting_for_reply_body", False) and \
-       not st.session_state.get("waiting_for_text_reply_body", False):
+       not st.session_state.get("waiting_for_text_reply_body", False) and \
+       not st.session_state.get("outlook_auth_pending", False): # Don't auto-listen if pending Outlook auth
         
-        st.session_state.needs_auto_listen = False # Reset flag before potentially re-enabling
+        st.session_state.needs_auto_listen = False 
         trigger_auto_listen()
     else:
-        # If waiting for a reply, don't auto-listen, reset the flag.
         st.session_state.needs_auto_listen = False
 
-# --- GMAIL INTEGRATION UI ---
-st.markdown("---")
-st.header("📧 Gmail Integration")
+# --- EMAIL INTEGRATION UI ---
+st.sidebar.markdown("---")
+st.sidebar.header("📧 Email Services")
 
-if not st.session_state.gmail_service:
-    if st.button("🔗 Connect to Gmail"):
+# Function to initialize or update VoiceEmailHandler
+def initialize_voice_email_handler():
+    gmail_s = st.session_state.get("gmail_service")
+    outlook_s = st.session_state.get("outlook_service")
+    
+    current_handler = st.session_state.get("voice_email_handler")
+    initial_type = 'gmail' # Default
+    if current_handler and current_handler.active_service_type:
+        initial_type = current_handler.active_service_type # Preserve current active if handler exists
+    elif outlook_s and not gmail_s : # If only outlook is connected initially
+        initial_type = 'outlook'
+
+    st.session_state.voice_email_handler = VoiceEmailHandler(
+        gmail_service=gmail_s,
+        outlook_service=outlook_s,
+        initial_service_type=initial_type
+    )
+    print(f"VoiceEmailHandler initialized/updated. Gmail: {'Connected' if gmail_s else 'Not'}, Outlook: {'Connected' if outlook_s else 'Not'}. Active: {st.session_state.voice_email_handler.active_service_type}")
+
+
+# Gmail Connection
+if not st.session_state.get("gmail_service"):
+    if st.sidebar.button("🔗 Connect to Gmail"):
         try:
             st.session_state.gmail_service = email_utils.authenticate_gmail()
             if st.session_state.gmail_service:
-                st.session_state.voice_email_handler = VoiceEmailHandler(st.session_state.gmail_service)
-                st.success("Successfully connected to Gmail and voice email handler is ready!") # Update message
+                initialize_voice_email_handler()
+                st.sidebar.success("Gmail connected!")
                 st.rerun()
             else:
-                st.error("Failed to connect to Gmail. Please check credentials.json and ensure you have authorized the app.")
+                st.sidebar.error("Gmail connection failed.")
         except FileNotFoundError:
-            st.error(f"Error: The credentials file ({config.GMAIL_CREDENTIALS_PATH}) was not found. Please make sure it's in the correct location.")
+            st.sidebar.error(f"Gmail credentials not found at {config.GMAIL_CREDENTIALS_PATH}")
         except Exception as e:
-            st.error(f"An unexpected error occurred during Gmail authentication: {e}")
-else: # Already connected
-    st.success("✅ Connected to Gmail")
-    if st.session_state.gmail_service and not st.session_state.voice_email_handler:
-        st.session_state.voice_email_handler = VoiceEmailHandler(st.session_state.gmail_service)
-        # Optionally add a silent confirmation or small note if handler had to be re-initialized
-        print("VoiceEmailHandler re-initialized.")
-    
-    # --- Deprecated Email Search UI ---
-    # The following UI elements for searching and displaying emails directly
-    # have been deprecated in favor of voice/text commands.
-    
-    # search_query = st.text_input("Search query (e.g., from:sender@example.com is:unread)", key="gmail_search_query")
-    # if st.button("🔍 Search Emails"):
-    #     if st.session_state.gmail_service and search_query:
-    #         try:
-    #             st.session_state.emails_list = email_utils.list_emails(st.session_state.gmail_service, query=search_query, max_results=10)
-    #             if st.session_state.emails_list is None: # list_emails returns None on error
-    #                 st.warning("Could not retrieve emails. There might have been an API error or no emails matched your query.")
-    #             elif not st.session_state.emails_list: # Empty list
-    #                 st.info("No emails found matching your query.")
-    #             st.session_state.selected_email = None # Reset selected email view
-    #         except Exception as e:
-    #             st.error(f"An error occurred while searching emails: {e}")
-    #             st.session_state.emails_list = None
-    #     elif not search_query:
-    #         st.warning("Please enter a search query.")
-
-    # # Display Emails if list exists
-    # if st.session_state.emails_list:
-    #     st.markdown(f"Found **{len(st.session_state.emails_list)}** emails:")
-        
-    #     # We'll display basic info and a button to read the full email.
-    #     # To manage multiple "Read Email" buttons and their states, we'll update selected_email
-    #     # when a button is clicked and then display that email.
-
-    #     for index, email_item in enumerate(st.session_state.emails_list):
-    #         try:
-    #             # Fetch brief details (subject, from) for display in the list
-    #             # Note: list_emails might not return full details like subject/sender directly.
-    #             # For simplicity here, we'll try to get a summary.
-    #             # A more robust way would be to fetch minimal headers in list_emails or do a quick get here.
-                
-    #             # For now, let's assume list_emails gives us enough to identify the email (like 'id')
-    #             # and we'll fetch full details only when "Read Email" is clicked.
-    #             # The current email_utils.list_emails returns a list of message objects which have an 'id'.
-                
-    #             # We need to fetch snippet or subject for display. Let's fetch the subject for each.
-    #             # To avoid too many API calls, we'll first get the message object then extract subject
-    #             # This is a bit inefficient here, ideally list_emails would give more info or we'd batch.
-    #             # For now, let's just show ID and a button.
-                
-    #             msg_preview = st.session_state.gmail_service.users().messages().get(userId='me', id=email_item['id'], format='metadata', metadataHeaders=['Subject', 'From']).execute()
-    #             subject_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'Subject'), 'No Subject')
-    #             from_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'From'), 'Unknown Sender')
-
-    #             col_email, col_button = st.columns([4,1])
-    #             with col_email:
-    #                 st.markdown(f"**{subject_preview}** <br><small>From: {from_preview} (ID: {email_item['id']})</small>", unsafe_allow_html=True)
-    #             with col_button:
-    #                 if st.button(f"Read Email {index+1}", key=f"read_{email_item['id']}"):
-    #                     st.session_state.selected_email_id = email_item['id'] # Store ID of email to read
-    #                     # No need to call read_email here, will do it below based on selected_email_id
-    #                     st.rerun() # Rerun to show the selected email
-
-    #         except Exception as e:
-    #             st.error(f"Error processing email preview for ID {email_item.get('id', 'N/A')}: {e}")
+            st.sidebar.error(f"Gmail auth error: {str(e)[:100]}...") # Show first 100 chars
+else:
+    st.sidebar.success("✅ Gmail Connected")
+    if st.sidebar.button("Log Out Gmail"):
+        st.session_state.gmail_service = None
+        # Remove token.json to force re-authentication next time
+        if os.path.exists(config.GMAIL_TOKEN_PATH):
+            os.remove(config.GMAIL_TOKEN_PATH)
+        initialize_voice_email_handler() # Re-initialize handler with gmail_service as None
+        st.rerun()
 
 
-    # # Display Selected Email if an ID is set
-    # if hasattr(st.session_state, 'selected_email_id') and st.session_state.selected_email_id:
-    #     email_id_to_read = st.session_state.selected_email_id
-    #     with st.expander(f"Email Content (ID: {email_id_to_read})", expanded=True):
-    #         try:
-    #             email_content = email_utils.read_email(st.session_state.gmail_service, email_id_to_read)
-    #             if email_content:
-    #                 st.markdown(f"**From:** {email_content['from']}")
-    #                 st.markdown(f"**Subject:** {email_content['subject']}")
-    #                 st.markdown("---")
-    #                 st.markdown(email_content['body'], unsafe_allow_html=False) # Display body as Markdown
-    #             else:
-    #                 st.error("Could not read email content.")
-    #         except Exception as e:
-    #             st.error(f"An error occurred while reading email {email_id_to_read}: {e}")
-    #         if st.button("Close Email", key=f"close_{email_id_to_read}"):
-    #             st.session_state.selected_email_id = None
-    #             st.rerun()
+# Outlook Connection
+if not st.session_state.get("outlook_service"):
+    if st.sidebar.button("🔗 Connect to Outlook", key="connect_outlook_btn"):
+        st.session_state.outlook_auth_pending = True
+        try:
+            # Instantiate service - this will start auth flow and store details if device flow
+            temp_outlook_service = OutlookService(
+                client_id=config.OUTLOOK_CLIENT_ID, 
+                client_secret=config.OUTLOOK_CLIENT_SECRET, # May not be used for public client
+                tenant_id=config.OUTLOOK_TENANT_ID
+            )
+            if hasattr(temp_outlook_service, 'last_device_flow_details') and temp_outlook_service.last_device_flow_details:
+                st.session_state.outlook_auth_flow_details = temp_outlook_service.last_device_flow_details
+                # The service instance itself isn't fully authenticated yet if device flow is incomplete.
+                # We store the temporary service instance to call acquire_token_by_device_flow later.
+                # However, OutlookService's _auth_flow is currently blocking.
+                # For now, if it returns, it means it's either authenticated or failed.
+                if temp_outlook_service.graph_client:
+                    st.session_state.outlook_service = temp_outlook_service
+                    initialize_voice_email_handler()
+                    st.session_state.outlook_auth_pending = False
+                    st.session_state.outlook_auth_flow_details = None # Clear flow details
+                    st.sidebar.success("Outlook connected!")
+                    st.rerun()
+                else: # Auth failed within OutlookService constructor
+                    st.session_state.outlook_auth_pending = False
+                    st.sidebar.error("Outlook connection failed during authentication.")
+            elif temp_outlook_service.graph_client: # For non-device flows or if auth completed quickly
+                 st.session_state.outlook_service = temp_outlook_service
+                 initialize_voice_email_handler()
+                 st.session_state.outlook_auth_pending = False
+                 st.sidebar.success("Outlook connected!")
+                 st.rerun()
+            else: # Should not happen if auth_flow is blocking and fails - it should raise exception
+                st.session_state.outlook_auth_pending = False
+                st.sidebar.error("Outlook connection attempt did not result in an authenticated client or device flow details.")
+
+        except Exception as e:
+            st.session_state.outlook_auth_pending = False
+            st.sidebar.error(f"Outlook auth error: {str(e)[:100]}...")
+            # Clear any partial auth details
+            st.session_state.outlook_auth_flow_details = None
 
 
-# --- END GMAIL INTEGRATION UI ---
+    if st.session_state.get("outlook_auth_flow_details"):
+        flow_info = st.session_state.outlook_auth_flow_details
+        st.sidebar.info(
+            f"To complete Outlook authentication, please go to: \n[{flow_info['verification_uri']}]({flow_info['verification_uri']}) \n"
+            f"And enter code: **{flow_info['user_code']}**"
+        )
+        st.sidebar.warning("The application will be blocked until authentication is complete or times out.")
+        # In a real web app, we'd avoid blocking the whole app here.
+        # Since OutlookService's _auth_flow is currently blocking, the app effectively waits there.
+        # If _auth_flow was non-blocking up to acquire_token_by_device_flow, we'd need a "I have authenticated" button.
+
+else: # Outlook service exists
+    st.sidebar.success("✅ Outlook Connected")
+    if st.sidebar.button("Log Out Outlook"):
+        st.session_state.outlook_service = None
+        st.session_state.outlook_auth_flow_details = None
+        st.session_state.outlook_auth_pending = False
+        # For MSAL, token caching is usually handled by MSAL itself.
+        # To force re-auth, clearing the MSAL token cache would be needed.
+        # This is complex as it's internal to MSAL. Simplest is to restart app or re-auth.
+        # For device flow, re-initiating often works.
+        initialize_voice_email_handler() # Re-initialize handler
+        st.rerun()
+
+# Initialize VoiceEmailHandler if services are available but handler is not yet set
+# (e.g. after initial app load if one service was already connected via cached tokens)
+if not st.session_state.get("voice_email_handler") and \
+   (st.session_state.get("gmail_service") or st.session_state.get("outlook_service")):
+    initialize_voice_email_handler()
+
+# Display current active service if handler is available
+if st.session_state.get("voice_email_handler") and st.session_state.voice_email_handler.active_service_type:
+    active_service_display_name = st.session_state.voice_email_handler._get_active_service_name()
+    st.sidebar.caption(f"🗣️ Active for voice/text commands: **{active_service_display_name}**")
+elif st.session_state.get("voice_email_handler"):
+    st.sidebar.caption("🗣️ Voice/text: No email service active.")
+
+
+# --- Deprecated Email Search UI ---
+# The following UI elements for searching and displaying emails directly
+    # have been deprecated in favor of voice/text commands. These are commented out.
+
+# --- END EMAIL INTEGRATION UI ---
 
 if config.ENABLE_LOGGING:
     os.makedirs(os.path.dirname(config.LOG_FILE_PATH), exist_ok=True)
