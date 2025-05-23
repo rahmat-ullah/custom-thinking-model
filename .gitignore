@@ -29,6 +29,7 @@ venv/
 env/
 ENV/
 .env
+logs/chat_history.json
 
 # Testing
 .coverage
@@ -51,3 +52,5 @@ Thumbs.db
 # Environments
 .env
 .venv 
+credentials.json
+token.json

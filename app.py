@@ -9,7 +9,6 @@ from utils import save_chat_history, load_chat_history
 import audio_utils
 import email_utils # Gmail integration
 from voice_email_handler import VoiceEmailHandler # Add this import
-import datetime # ensure datetime is imported
 import os # ensure os is imported
 
 # Set page configuration
