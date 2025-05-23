@@ -35,11 +35,55 @@ if "selected_email" not in st.session_state: # Currently selected email to read
     st.session_state.selected_email = None
 if "voice_email_handler" not in st.session_state:
     st.session_state.voice_email_handler = None # Will be initialized once gmail_service is available
-if "waiting_for_reply_body" not in st.session_state: # For multi-turn reply
+if "waiting_for_reply_body" not in st.session_state: # For multi-turn reply (voice)
    st.session_state.waiting_for_reply_body = False
+if "waiting_for_text_reply_body" not in st.session_state: # For multi-turn reply (text)
+    st.session_state.waiting_for_text_reply_body = False
+if "selected_tts_voice" not in st.session_state: # For OpenAI TTS Voice Selection
+    st.session_state.selected_tts_voice = "alloy" # Default voice
+if "continuous_listening_mode" not in st.session_state:
+    st.session_state.continuous_listening_mode = False
+if "needs_auto_listen" not in st.session_state:
+    st.session_state.needs_auto_listen = False
+
+
+# --- AVAILABLE TTS VOICES ---
+AVAILABLE_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 
 
 # --- MODIFIED/NEW FUNCTIONS ---
+
+# --- Auto-Listen Function ---
+def trigger_auto_listen():
+    """Handles the auto-listening sequence if conditions are met."""
+    if not (st.session_state.get("talking_mode_enabled", False) and \
+            st.session_state.get("continuous_listening_mode", False)):
+        return
+
+    st.sidebar.info("Auto-listening...")
+    recognized_text = audio_utils.listen_to_user()
+    st.sidebar.info("")  # Clear the listening message
+
+    if recognized_text:
+        st.session_state.user_input = recognized_text # Show what was heard
+        # Directly process the command. process_voice_command will handle speaking
+        # and then re-set needs_auto_listen if still applicable.
+        process_voice_command(recognized_text)
+    else:
+        # If nothing was recognized, and we are in continuous mode,
+        # we might want to immediately listen again or provide a silent cue.
+        # For now, if nothing is heard, the chain stops unless an explicit action is taken.
+        # Alternatively, to keep listening:
+        # st.session_state.needs_auto_listen = True
+        # st.rerun() # To make the script re-evaluate needs_auto_listen
+        pass # Or, to re-trigger listening immediately:
+             # if st.session_state.get("talking_mode_enabled", False) and \
+             #    st.session_state.get("continuous_listening_mode", False):
+             #    st.session_state.needs_auto_listen = True 
+             #    # No rerun here, let the main script loop handle it to avoid deep recursion
+    # No explicit st.rerun() here to avoid potential loops if not handled carefully.
+    # process_voice_command should trigger reruns if it updates state/UI.
+
 def process_general_llm_input(user_input_text: str, called_from_voice: bool):
     """Handles input for ThinkingChat and DirectChat, and TTS if applicable."""
     if not user_input_text.strip():
@@ -61,24 +105,57 @@ def process_general_llm_input(user_input_text: str, called_from_voice: bool):
         current_logs.append(log_entry)
         save_chat_history(current_logs, config.LOG_FILE_PATH)
 
+    speech_was_made = False
     if st.session_state.talking_mode_enabled and called_from_voice:
         # Per issue: "In voice mode it shouldn't use thinking chat mode."
         # So, for non-email commands processed via voice, use DirectChat response.
-        audio_utils.speak_text(direct_response)
+        audio_utils.speak_text(direct_response, voice_id=st.session_state.selected_tts_voice)
+        speech_was_made = True
     elif st.session_state.talking_mode_enabled and not called_from_voice:
         # This is for text input submitted while talking mode is on.
         # Original behavior was to speak both. Let's keep DirectChat for consistency in voice.
-         audio_utils.speak_text(direct_response) # Or let user choose? For now, stick to direct for voice.
+         audio_utils.speak_text(direct_response, voice_id=st.session_state.selected_tts_voice)
+         speech_was_made = True
 
-    st.session_state.user_input = ""
+    st.session_state.user_input = "" # Clear input after processing
+
+    if speech_was_made and st.session_state.get("continuous_listening_mode", False):
+        st.session_state.needs_auto_listen = True
 
 
 def process_voice_command(recognized_text: str):
-    """Processes recognized speech: routes to email handler or general LLM."""
+    """Processes recognized speech: routes to email handler or general LLM, or handles stop command."""
     text_lower = recognized_text.lower()
+    
+    # Check for stop listening commands first
+    stop_phrases = ["stop listening", "exit continuous mode", "cancel continuous listening", "turn off continuous listening"]
+    if any(phrase in text_lower for phrase in stop_phrases):
+        if st.session_state.get("continuous_listening_mode", False):
+            st.session_state.continuous_listening_mode = False
+            st.session_state.needs_auto_listen = False # Cancel any pending auto-listen
+            confirmation_message = "Continuous listening disabled."
+            audio_utils.speak_text(confirmation_message, voice_id=st.session_state.get("selected_tts_voice", "alloy"))
+            # Update UI if needed, e.g., by clearing user_input or adding to chat
+            st.session_state.user_input = "" # Clear any partial input that might have been the stop command
+            # Add to direct chat for visual confirmation
+            st.session_state.direct_chat.add_message("user", recognized_text) # Show the stop command
+            st.session_state.direct_chat.add_message("assistant", confirmation_message)
+            st.rerun() # Rerun to update UI, especially the checkbox
+            return # Stop further processing
+        else:
+            # If not in continuous mode, "stop listening" might be a general query
+            pass # Let it be processed as a normal command
+
     handler = st.session_state.get("voice_email_handler")
     response_text = None
     email_command_handled = False
+
+    WORD_TO_DIGIT = {
+        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+        "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+        "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10"
+    }
 
     # Check if waiting for reply body
     if st.session_state.get("waiting_for_reply_body", False) and handler and handler.current_email_id:
@@ -87,18 +164,59 @@ def process_voice_command(recognized_text: str):
         email_command_handled = True
     # Email-related command intent recognition
     elif handler: # Only if Gmail is connected and handler initialized
-        if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email"]):
-            response_text = handler.fetch_unread_emails_voice()
+        if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email", "get my last email"]):
+            max_results = 5 # Default
+            words = text_lower.split()
+            for i, word in enumerate(words):
+                if word.isdigit():
+                    max_results = int(word)
+                    break
+                # Example: "get my last three emails" - check word before "email"
+                if word in ["emails", "email"] and i > 0 and words[i-1].isdigit():
+                    max_results = int(words[i-1])
+                    break
+                if word in ["emails", "email"] and i > 0 and words[i-1] in WORD_TO_DIGIT:
+                    max_results = int(WORD_TO_DIGIT[words[i-1]])
+                    break
+            response_text = handler.fetch_unread_emails_voice(max_results=max_results)
             email_command_handled = True
         elif "read email" in text_lower or "open email" in text_lower:
-            identifier = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
-            if not identifier and "subject" in text_lower: # e.g. "read email with subject meeting"
-                 identifier = text_lower.split("subject",1)[-1].strip()
-            if not identifier and "from" in text_lower: # e.g. "read email from john"
-                 identifier = text_lower.split("from",1)[-1].strip()
+            identifier_part = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
+            
+            identifier = None
+            words = identifier_part.split()
+            # Check for number words first (e.g., "read email one", "open the second email")
+            # It will also catch "read email number one" if "number" is part of identifier_part
+            processed_identifier_words = []
+            found_num_word = False
+            for word in words:
+                if word in WORD_TO_DIGIT:
+                    processed_identifier_words.append(WORD_TO_DIGIT[word])
+                    found_num_word = True
+                else:
+                    processed_identifier_words.append(word)
+            
+            if found_num_word:
+                 # Prefer the converted number word if it exists and is a simple number (e.g. "read email one")
+                 # This helps distinguish "read email one" from "read email from One Two Three company"
+                potential_num = "".join(filter(str.isdigit, "".join(processed_identifier_words)))
+                if potential_num.isdigit() and len(potential_num) < 3 : # Avoid long accidental numbers from names
+                    identifier = potential_num
+            
+            if not identifier: # If no number word was converted or it wasn't a simple number
+                identifier = " ".join(processed_identifier_words) # Use the (potentially modified) full string
+
+            # Fallback for "subject" or "from" if no numeric identifier was prioritized
+            if not identifier or not any(char.isdigit() for char in identifier): # if identifier is not primarily numeric
+                if "subject" in identifier_part:
+                     identifier = identifier_part.split("subject",1)[-1].strip()
+                elif "from" in identifier_part:
+                     identifier = identifier_part.split("from",1)[-1].strip()
+                elif not identifier_part: # "read email" without anything after
+                    identifier = "" # Will trigger the "Please specify" message
 
             if identifier:
-                response_text = handler.read_email_voice(identifier)
+                response_text = handler.read_email_voice(identifier) # identifier can be a number string or other text
             else:
                 response_text = "Please specify which email to read, for example, 'read email number one' or 'read email from Jane'."
             email_command_handled = True
@@ -116,9 +234,11 @@ def process_voice_command(recognized_text: str):
         response_text = "To use email commands, please first connect to Gmail using the button in the user interface."
         email_command_handled = True # Handled by informing the user
 
+    speech_was_made_by_email_handler = False
     if email_command_handled:
         if response_text:
-            audio_utils.speak_text(response_text)
+            audio_utils.speak_text(response_text, voice_id=st.session_state.selected_tts_voice)
+            speech_was_made_by_email_handler = True
         # Log this interaction
         if config.ENABLE_LOGGING and recognized_text and response_text : # ensure values exist
             log_entry = {
@@ -133,10 +253,106 @@ def process_voice_command(recognized_text: str):
         # Not an email command, or email command could not be fully processed by handler (e.g. bad parse)
         # Fallback to general LLM processing for voice.
         st.session_state.user_input = recognized_text # Show recognized text in input box
-        process_general_llm_input(recognized_text, called_from_voice=True)
+        # General LLM processing will handle its own potential auto-listen trigger
+        process_general_llm_input(recognized_text, called_from_voice=True) 
+    
+    # If an email command was handled and spoke, then check for continuous listening
+    if speech_was_made_by_email_handler and \
+       st.session_state.get("talking_mode_enabled", False) and \
+       st.session_state.get("continuous_listening_mode", False):
+        st.session_state.needs_auto_listen = True
+
+
+# --- Process Email Command Text Function ---
+def process_email_command_text(text_input: str, handler: VoiceEmailHandler):
+    """Processes text input for email commands."""
+    text_lower = text_input.lower()
+    response_text = None
+    email_command_handled = False # Flag to indicate if an email command was recognized and acted upon
+
+    WORD_TO_DIGIT = {
+        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+        "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+        "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10"
+    }
+
+    # Check if waiting for reply body (for text-based reply)
+    # This check is actually done in handle_submit before calling this function.
+    # Here, we focus on initial command processing.
+
+    if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email", "get my last email"]):
+        max_results = 5 # Default
+        words = text_lower.split()
+        for i, word in enumerate(words):
+            if word.isdigit():
+                max_results = int(word)
+                break
+            if word in ["emails", "email"] and i > 0 and words[i-1].isdigit():
+                max_results = int(words[i-1])
+                break
+            if word in ["emails", "email"] and i > 0 and words[i-1] in WORD_TO_DIGIT:
+                max_results = int(WORD_TO_DIGIT[words[i-1]])
+                break
+        response_text = handler.fetch_unread_emails_voice(max_results=max_results) # Reuses voice method, which is fine as it returns text
+        email_command_handled = True
+    elif "read email" in text_lower or "open email" in text_lower:
+        identifier_part = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
+        identifier = None
+        words = identifier_part.split()
+        processed_identifier_words = []
+        found_num_word = False
+        for word in words:
+            if word in WORD_TO_DIGIT:
+                processed_identifier_words.append(WORD_TO_DIGIT[word])
+                found_num_word = True
+            else:
+                processed_identifier_words.append(word)
+        
+        if found_num_word:
+            potential_num = "".join(filter(str.isdigit, "".join(processed_identifier_words)))
+            if potential_num.isdigit() and len(potential_num) < 3:
+                identifier = potential_num
+        
+        if not identifier:
+            identifier = " ".join(processed_identifier_words)
+
+        if not identifier or not any(char.isdigit() for char in identifier):
+            if "subject" in identifier_part:
+                 identifier = identifier_part.split("subject",1)[-1].strip()
+            elif "from" in identifier_part:
+                 identifier = identifier_part.split("from",1)[-1].strip()
+            elif not identifier_part : # "read email" without anything after
+                 identifier = "" 
+
+        if identifier:
+            response_text = handler.read_email_voice(identifier) # Reuses voice method
+        else:
+            response_text = "Please specify which email to read, for example, 'read email number one' or 'read email from Jane'."
+        email_command_handled = True
+    elif "reply to this email" in text_lower or "reply email" in text_lower:
+        if handler.current_email_id:
+            response_text = "What would you like to say in your reply? Please type your message."
+            st.session_state.waiting_for_text_reply_body = True # Set flag for text reply
+            # Unlike voice, we don't immediately expect the body. Text input will trigger next.
+        else:
+            response_text = "Please read an email first before replying via text."
+        email_command_handled = True
+    # No "send reply saying" for text - handled by waiting_for_text_reply_body state in handle_submit
+
+    if email_command_handled:
+        return response_text
+    return None # Return None if no specific email command was handled by this function
 
 
 def handle_mic_input(): # This is the main entry for voice
+    # Clicking the "Speak" button explicitly disables continuous listening for this interaction
+    if st.session_state.get("continuous_listening_mode", False):
+        st.session_state.continuous_listening_mode = False
+        st.session_state.needs_auto_listen = False 
+        # Optionally, inform the user that continuous mode was stopped by this action.
+        # For now, it's an implicit stop. The checkbox will update on rerun.
+        
     st.sidebar.info("Listening...")
     recognized_text = audio_utils.listen_to_user()
     st.sidebar.info("") # Clear "Listening..."
@@ -151,11 +367,70 @@ def handle_mic_input(): # This is the main entry for voice
 
 
 def handle_submit(): # This is for text based submission
-    user_text = st.session_state.user_input
-    if user_text:
-        # If talking mode is enabled, text submissions also use direct chat for voice output
-        # otherwise, no voice output.
-        process_general_llm_input(user_text, called_from_voice=False) # `called_from_voice=False` means it's text input
+    user_text_from_input_box = st.session_state.user_input 
+    
+    # If user types and submits something while continuous listening was on, disable it.
+    if user_text_from_input_box and st.session_state.get("continuous_listening_mode", False):
+        st.session_state.continuous_listening_mode = False
+        st.session_state.needs_auto_listen = False
+        print("Continuous listening disabled due to typing and submitting text.") # For debugging
+        # The checkbox in the sidebar will update due to st.rerun() later in this function or by process_general_llm.
+        # No audio confirmation here, as the user is typing.
+        # The submitted text (user_text_from_input_box) will be processed as usual.
+
+    if not user_text_from_input_box: # Check if after potential modifications, input is empty
+        return
+
+    handler = st.session_state.get("voice_email_handler")
+    email_response_text = None
+    email_command_processed_for_submit = False # Flag to skip general LLM if email handled
+
+    if handler:
+        # Check if waiting for the body of a text reply
+        if st.session_state.get("waiting_for_text_reply_body", False) and handler.current_email_id:
+            # User's current input is the reply body
+            email_response_text = handler.prepare_reply_voice(user_text) # Re-use voice version, it just returns text
+            st.session_state.waiting_for_text_reply_body = False # Reset flag
+            email_command_processed_for_submit = True
+        else:
+            # Not waiting for a reply body, so try to process as a new email command
+            # We can do a quick check for keywords to see if it *might* be an email command
+            # before calling the full process_email_command_text.
+            # This avoids calling it unnecessarily for every text input.
+            email_keywords = ["email", "mail", "unread", "fetch", "read", "open", "reply", "inbox", "message"]
+            if any(keyword in user_text.lower() for keyword in email_keywords):
+                email_response_text = process_email_command_text(user_text, handler)
+                if email_response_text:
+                    email_command_processed_for_submit = True
+        
+        if email_command_processed_for_submit and email_response_text:
+            # Display in DirectChat (or your chosen chat display)
+            st.session_state.direct_chat.add_message("user", user_text)
+            st.session_state.direct_chat.add_message("assistant", email_response_text)
+            speech_was_made_in_submit = False
+            if st.session_state.talking_mode_enabled:
+                audio_utils.speak_text(email_response_text, voice_id=st.session_state.selected_tts_voice)
+                speech_was_made_in_submit = True
+            
+            st.session_state.user_input = "" # Clear input box
+            if speech_was_made_in_submit and st.session_state.get("continuous_listening_mode", False):
+                st.session_state.needs_auto_listen = True
+            # Log this interaction if needed (similar to how process_voice_command logs)
+            if config.ENABLE_LOGGING:
+                log_entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "user_input (text_email)": user_text,
+                    "handler_response": email_response_text,
+                }
+                current_logs = load_chat_history(config.LOG_FILE_PATH)
+                current_logs.append(log_entry)
+                save_chat_history(current_logs, config.LOG_FILE_PATH)
+            st.rerun() # Rerun to update UI immediately
+            return # Stop further processing
+
+    # If not an email command handled by the above, or no handler, process as general input
+    if not email_command_processed_for_submit:
+        process_general_llm_input(user_text_from_input_box, called_from_voice=False) # called_from_voice=False for text input
 
 def clear_chats():
     st.session_state.thinking_chat.clear_messages()
@@ -176,6 +451,21 @@ st.session_state.talking_mode_enabled = st.sidebar.checkbox(
 )
 
 if st.session_state.talking_mode_enabled:
+    st.sidebar.caption("Note: The assistant's voice is AI-generated.") # AI Voice Disclosure
+    
+    # Voice Selection UI
+    st.sidebar.selectbox(
+        "Choose Assistant Voice:",
+        options=AVAILABLE_TTS_VOICES,
+        key="selected_tts_voice" # This directly updates st.session_state.selected_tts_voice
+    )
+
+    st.sidebar.checkbox(
+        "Enable Continuous Listening",
+        key="continuous_listening_mode", # This binds it to the session state
+        help="When enabled, the assistant will automatically listen for your next command after speaking."
+    )
+
     if st.sidebar.button("🎤 Speak"):
         handle_mic_input()
     st.sidebar.caption("Click 'Speak' then talk. Your message will appear in the input box below and be processed.")
@@ -238,6 +528,22 @@ st.markdown("""
 if config.ENABLE_LOGGING:
     os.makedirs(os.path.dirname(config.LOG_FILE_PATH), exist_ok=True)
 
+# --- Main script logic for auto-listening ---
+# This should be one of the last things in the script to ensure all other UI updates
+# and state changes for the current run have been processed.
+if st.session_state.get("needs_auto_listen", False):
+    # Only trigger if not already in a state that implies user is about to type/speak
+    # (e.g., waiting for reply body for voice or text)
+    # This check might be too restrictive or need refinement depending on desired UX
+    if not st.session_state.get("waiting_for_reply_body", False) and \
+       not st.session_state.get("waiting_for_text_reply_body", False):
+        
+        st.session_state.needs_auto_listen = False # Reset flag before potentially re-enabling
+        trigger_auto_listen()
+    else:
+        # If waiting for a reply, don't auto-listen, reset the flag.
+        st.session_state.needs_auto_listen = False
+
 # --- GMAIL INTEGRATION UI ---
 st.markdown("---")
 st.header("📧 Gmail Integration")
@@ -263,82 +569,85 @@ else: # Already connected
         # Optionally add a silent confirmation or small note if handler had to be re-initialized
         print("VoiceEmailHandler re-initialized.")
     
-    # Email Search
-    search_query = st.text_input("Search query (e.g., from:sender@example.com is:unread)", key="gmail_search_query")
-    if st.button("🔍 Search Emails"):
-        if st.session_state.gmail_service and search_query:
-            try:
-                st.session_state.emails_list = email_utils.list_emails(st.session_state.gmail_service, query=search_query, max_results=10)
-                if st.session_state.emails_list is None: # list_emails returns None on error
-                    st.warning("Could not retrieve emails. There might have been an API error or no emails matched your query.")
-                elif not st.session_state.emails_list: # Empty list
-                    st.info("No emails found matching your query.")
-                st.session_state.selected_email = None # Reset selected email view
-            except Exception as e:
-                st.error(f"An error occurred while searching emails: {e}")
-                st.session_state.emails_list = None
-        elif not search_query:
-            st.warning("Please enter a search query.")
+    # --- Deprecated Email Search UI ---
+    # The following UI elements for searching and displaying emails directly
+    # have been deprecated in favor of voice/text commands.
+    
+    # search_query = st.text_input("Search query (e.g., from:sender@example.com is:unread)", key="gmail_search_query")
+    # if st.button("🔍 Search Emails"):
+    #     if st.session_state.gmail_service and search_query:
+    #         try:
+    #             st.session_state.emails_list = email_utils.list_emails(st.session_state.gmail_service, query=search_query, max_results=10)
+    #             if st.session_state.emails_list is None: # list_emails returns None on error
+    #                 st.warning("Could not retrieve emails. There might have been an API error or no emails matched your query.")
+    #             elif not st.session_state.emails_list: # Empty list
+    #                 st.info("No emails found matching your query.")
+    #             st.session_state.selected_email = None # Reset selected email view
+    #         except Exception as e:
+    #             st.error(f"An error occurred while searching emails: {e}")
+    #             st.session_state.emails_list = None
+    #     elif not search_query:
+    #         st.warning("Please enter a search query.")
 
-    # Display Emails if list exists
-    if st.session_state.emails_list:
-        st.markdown(f"Found **{len(st.session_state.emails_list)}** emails:")
+    # # Display Emails if list exists
+    # if st.session_state.emails_list:
+    #     st.markdown(f"Found **{len(st.session_state.emails_list)}** emails:")
         
-        # We'll display basic info and a button to read the full email.
-        # To manage multiple "Read Email" buttons and their states, we'll update selected_email
-        # when a button is clicked and then display that email.
+    #     # We'll display basic info and a button to read the full email.
+    #     # To manage multiple "Read Email" buttons and their states, we'll update selected_email
+    #     # when a button is clicked and then display that email.
 
-        for index, email_item in enumerate(st.session_state.emails_list):
-            try:
-                # Fetch brief details (subject, from) for display in the list
-                # Note: list_emails might not return full details like subject/sender directly.
-                # For simplicity here, we'll try to get a summary.
-                # A more robust way would be to fetch minimal headers in list_emails or do a quick get here.
+    #     for index, email_item in enumerate(st.session_state.emails_list):
+    #         try:
+    #             # Fetch brief details (subject, from) for display in the list
+    #             # Note: list_emails might not return full details like subject/sender directly.
+    #             # For simplicity here, we'll try to get a summary.
+    #             # A more robust way would be to fetch minimal headers in list_emails or do a quick get here.
                 
-                # For now, let's assume list_emails gives us enough to identify the email (like 'id')
-                # and we'll fetch full details only when "Read Email" is clicked.
-                # The current email_utils.list_emails returns a list of message objects which have an 'id'.
+    #             # For now, let's assume list_emails gives us enough to identify the email (like 'id')
+    #             # and we'll fetch full details only when "Read Email" is clicked.
+    #             # The current email_utils.list_emails returns a list of message objects which have an 'id'.
                 
-                # We need to fetch snippet or subject for display. Let's fetch the subject for each.
-                # To avoid too many API calls, we'll first get the message object then extract subject
-                # This is a bit inefficient here, ideally list_emails would give more info or we'd batch.
-                # For now, let's just show ID and a button.
+    #             # We need to fetch snippet or subject for display. Let's fetch the subject for each.
+    #             # To avoid too many API calls, we'll first get the message object then extract subject
+    #             # This is a bit inefficient here, ideally list_emails would give more info or we'd batch.
+    #             # For now, let's just show ID and a button.
                 
-                msg_preview = st.session_state.gmail_service.users().messages().get(userId='me', id=email_item['id'], format='metadata', metadataHeaders=['Subject', 'From']).execute()
-                subject_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'Subject'), 'No Subject')
-                from_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'From'), 'Unknown Sender')
+    #             msg_preview = st.session_state.gmail_service.users().messages().get(userId='me', id=email_item['id'], format='metadata', metadataHeaders=['Subject', 'From']).execute()
+    #             subject_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'Subject'), 'No Subject')
+    #             from_preview = next((header['value'] for header in msg_preview['payload']['headers'] if header['name'] == 'From'), 'Unknown Sender')
 
-                col_email, col_button = st.columns([4,1])
-                with col_email:
-                    st.markdown(f"**{subject_preview}** <br><small>From: {from_preview} (ID: {email_item['id']})</small>", unsafe_allow_html=True)
-                with col_button:
-                    if st.button(f"Read Email {index+1}", key=f"read_{email_item['id']}"):
-                        st.session_state.selected_email_id = email_item['id'] # Store ID of email to read
-                        # No need to call read_email here, will do it below based on selected_email_id
-                        st.rerun() # Rerun to show the selected email
+    #             col_email, col_button = st.columns([4,1])
+    #             with col_email:
+    #                 st.markdown(f"**{subject_preview}** <br><small>From: {from_preview} (ID: {email_item['id']})</small>", unsafe_allow_html=True)
+    #             with col_button:
+    #                 if st.button(f"Read Email {index+1}", key=f"read_{email_item['id']}"):
+    #                     st.session_state.selected_email_id = email_item['id'] # Store ID of email to read
+    #                     # No need to call read_email here, will do it below based on selected_email_id
+    #                     st.rerun() # Rerun to show the selected email
 
-            except Exception as e:
-                st.error(f"Error processing email preview for ID {email_item.get('id', 'N/A')}: {e}")
+    #         except Exception as e:
+    #             st.error(f"Error processing email preview for ID {email_item.get('id', 'N/A')}: {e}")
 
 
-    # Display Selected Email if an ID is set
-    if hasattr(st.session_state, 'selected_email_id') and st.session_state.selected_email_id:
-        email_id_to_read = st.session_state.selected_email_id
-        with st.expander(f"Email Content (ID: {email_id_to_read})", expanded=True):
-            try:
-                email_content = email_utils.read_email(st.session_state.gmail_service, email_id_to_read)
-                if email_content:
-                    st.markdown(f"**From:** {email_content['from']}")
-                    st.markdown(f"**Subject:** {email_content['subject']}")
-                    st.markdown("---")
-                    st.markdown(email_content['body'], unsafe_allow_html=False) # Display body as Markdown
-                else:
-                    st.error("Could not read email content.")
-            except Exception as e:
-                st.error(f"An error occurred while reading email {email_id_to_read}: {e}")
-            if st.button("Close Email", key=f"close_{email_id_to_read}"):
-                st.session_state.selected_email_id = None
-                st.rerun()
+    # # Display Selected Email if an ID is set
+    # if hasattr(st.session_state, 'selected_email_id') and st.session_state.selected_email_id:
+    #     email_id_to_read = st.session_state.selected_email_id
+    #     with st.expander(f"Email Content (ID: {email_id_to_read})", expanded=True):
+    #         try:
+    #             email_content = email_utils.read_email(st.session_state.gmail_service, email_id_to_read)
+    #             if email_content:
+    #                 st.markdown(f"**From:** {email_content['from']}")
+    #                 st.markdown(f"**Subject:** {email_content['subject']}")
+    #                 st.markdown("---")
+    #                 st.markdown(email_content['body'], unsafe_allow_html=False) # Display body as Markdown
+    #             else:
+    #                 st.error("Could not read email content.")
+    #         except Exception as e:
+    #             st.error(f"An error occurred while reading email {email_id_to_read}: {e}")
+    #         if st.button("Close Email", key=f"close_{email_id_to_read}"):
+    #             st.session_state.selected_email_id = None
+    #             st.rerun()
 
 
 # --- END GMAIL INTEGRATION UI ---

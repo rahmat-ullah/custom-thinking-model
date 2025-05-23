@@ -3,7 +3,10 @@ openai
 python-dotenv
 SpeechRecognition
 PyAudio
-pyttsx3
+# pyttsx3 is no longer used for TTS
+# google-cloud-texttospeech is no longer used, replaced by OpenAI TTS
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+pygame
+# openai is already listed, ensure it's up-to-date if necessary, but it's present.
