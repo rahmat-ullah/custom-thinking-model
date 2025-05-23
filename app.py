@@ -6,8 +6,11 @@ from thinking_chat import ThinkingChat
 from direct_chat import DirectChat
 import config
 from utils import save_chat_history, load_chat_history
-import audio_utils # New import
+import audio_utils
 import email_utils # Gmail integration
+from voice_email_handler import VoiceEmailHandler # Add this import
+import datetime # ensure datetime is imported
+import os # ensure os is imported
 
 # Set page configuration
 st.set_page_config(
@@ -31,55 +34,129 @@ if "emails_list" not in st.session_state: # List of emails
     st.session_state.emails_list = None
 if "selected_email" not in st.session_state: # Currently selected email to read
     st.session_state.selected_email = None
+if "voice_email_handler" not in st.session_state:
+    st.session_state.voice_email_handler = None # Will be initialized once gmail_service is available
+if "waiting_for_reply_body" not in st.session_state: # For multi-turn reply
+   st.session_state.waiting_for_reply_body = False
 
 
 # --- MODIFIED/NEW FUNCTIONS ---
-def process_input_for_llm(user_input_text: str):
-    if user_input_text.strip():
-        # Process the user input in both chats
-        thinking_plan, thinking_response = st.session_state.thinking_chat.process_message(user_input_text)
-        direct_response = st.session_state.direct_chat.process_message(user_input_text)
-        
-        # Log the conversation
-        if config.ENABLE_LOGGING:
-            # Ensure logs directory exists
-            os.makedirs(os.path.dirname(config.LOG_FILE_PATH), exist_ok=True)
-            
-            # Create log entry
+def process_general_llm_input(user_input_text: str, called_from_voice: bool):
+    """Handles input for ThinkingChat and DirectChat, and TTS if applicable."""
+    if not user_input_text.strip():
+        return
+
+    thinking_plan, thinking_response = st.session_state.thinking_chat.process_message(user_input_text)
+    direct_response = st.session_state.direct_chat.process_message(user_input_text)
+
+    if config.ENABLE_LOGGING:
+        os.makedirs(os.path.dirname(config.LOG_FILE_PATH), exist_ok=True)
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user_input": user_input_text,
+            "thinking_plan": thinking_plan,
+            "thinking_response": thinking_response,
+            "direct_response": direct_response
+        }
+        current_logs = load_chat_history(config.LOG_FILE_PATH)
+        current_logs.append(log_entry)
+        save_chat_history(current_logs, config.LOG_FILE_PATH)
+
+    if st.session_state.talking_mode_enabled and called_from_voice:
+        # Per issue: "In voice mode it shouldn't use thinking chat mode."
+        # So, for non-email commands processed via voice, use DirectChat response.
+        audio_utils.speak_text(direct_response)
+    elif st.session_state.talking_mode_enabled and not called_from_voice:
+        # This is for text input submitted while talking mode is on.
+        # Original behavior was to speak both. Let's keep DirectChat for consistency in voice.
+         audio_utils.speak_text(direct_response) # Or let user choose? For now, stick to direct for voice.
+
+    st.session_state.user_input = ""
+
+
+def process_voice_command(recognized_text: str):
+    """Processes recognized speech: routes to email handler or general LLM."""
+    text_lower = recognized_text.lower()
+    handler = st.session_state.get("voice_email_handler")
+    response_text = None
+    email_command_handled = False
+
+    # Check if waiting for reply body
+    if st.session_state.get("waiting_for_reply_body", False) and handler and handler.current_email_id:
+        st.session_state.waiting_for_reply_body = False # Reset flag
+        response_text = handler.prepare_reply_voice(recognized_text) # Entire input is reply body
+        email_command_handled = True
+    # Email-related command intent recognition
+    elif handler: # Only if Gmail is connected and handler initialized
+        if any(cmd in text_lower for cmd in ["read my unread email", "fetch unread email", "check my email", "get my unread email"]):
+            response_text = handler.fetch_unread_emails_voice()
+            email_command_handled = True
+        elif "read email" in text_lower or "open email" in text_lower:
+            identifier = text_lower.split("read email", 1)[-1].strip() if "read email" in text_lower else text_lower.split("open email", 1)[-1].strip()
+            if not identifier and "subject" in text_lower: # e.g. "read email with subject meeting"
+                 identifier = text_lower.split("subject",1)[-1].strip()
+            if not identifier and "from" in text_lower: # e.g. "read email from john"
+                 identifier = text_lower.split("from",1)[-1].strip()
+
+            if identifier:
+                response_text = handler.read_email_voice(identifier)
+            else:
+                response_text = "Please specify which email to read, for example, 'read email number one' or 'read email from Jane'."
+            email_command_handled = True
+        elif "reply to this email" in text_lower or "reply email" in text_lower:
+            if handler.current_email_id:
+                response_text = "What would you like to say in your reply?"
+                st.session_state.waiting_for_reply_body = True # Set flag
+            else:
+                response_text = "Please read an email first before replying."
+            email_command_handled = True
+        # No "send reply saying" - handled by waiting_for_reply_body state
+
+    elif not handler and any(keyword in text_lower for keyword in ["email", "mail", "message", "inbox", "unread", "reply"]):
+        # Email command attempted but Gmail not connected
+        response_text = "To use email commands, please first connect to Gmail using the button in the user interface."
+        email_command_handled = True # Handled by informing the user
+
+    if email_command_handled:
+        if response_text:
+            audio_utils.speak_text(response_text)
+        # Log this interaction
+        if config.ENABLE_LOGGING and recognized_text and response_text : # ensure values exist
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
-                "user_input": user_input_text, # Use the passed argument
-                "thinking_plan": thinking_plan,
-                "thinking_response": thinking_response,
-                "direct_response": direct_response
+                "user_input (voice_email)": recognized_text,
+                "handler_response": response_text,
             }
-            
-            # Save to log file
             current_logs = load_chat_history(config.LOG_FILE_PATH)
             current_logs.append(log_entry)
             save_chat_history(current_logs, config.LOG_FILE_PATH)
+    else:
+        # Not an email command, or email command could not be fully processed by handler (e.g. bad parse)
+        # Fallback to general LLM processing for voice.
+        st.session_state.user_input = recognized_text # Show recognized text in input box
+        process_general_llm_input(recognized_text, called_from_voice=True)
 
-        # Speak responses if talking mode is enabled
-        if st.session_state.talking_mode_enabled:
-            print("Attempting to speak thinking_response...") 
-            audio_utils.speak_text(f"Thinking Chat says: {thinking_response}")
-            print("Attempting to speak direct_response...")
-            audio_utils.speak_text(f"Direct Chat says: {direct_response}")
-            
-        st.session_state.user_input = "" 
 
-def handle_submit(): 
-    process_input_for_llm(st.session_state.user_input)
-
-def handle_mic_input(): 
-    st.sidebar.info("Listening...") 
+def handle_mic_input(): # This is the main entry for voice
+    st.sidebar.info("Listening...")
     recognized_text = audio_utils.listen_to_user()
+    st.sidebar.info("") # Clear "Listening..."
     if recognized_text:
-        st.session_state.user_input = recognized_text 
-        process_input_for_llm(recognized_text) 
+        st.session_state.user_input = recognized_text # Show what was heard
+        if st.session_state.talking_mode_enabled:
+            process_voice_command(recognized_text) # New central voice processing
+        # If not talking mode, text just stays in user_input for manual submission
     else:
         st.sidebar.warning("No speech detected or recognized.")
-    st.rerun() 
+    st.rerun()
+
+
+def handle_submit(): # This is for text based submission
+    user_text = st.session_state.user_input
+    if user_text:
+        # If talking mode is enabled, text submissions also use direct chat for voice output
+        # otherwise, no voice output.
+        process_general_llm_input(user_text, called_from_voice=False) # `called_from_voice=False` means it's text input
 
 def clear_chats():
     st.session_state.thinking_chat.clear_messages()
@@ -171,16 +248,21 @@ if not st.session_state.gmail_service:
         try:
             st.session_state.gmail_service = email_utils.authenticate_gmail()
             if st.session_state.gmail_service:
-                st.success("Successfully connected to Gmail!")
-                st.rerun() # Rerun to update UI based on new state
+                st.session_state.voice_email_handler = VoiceEmailHandler(st.session_state.gmail_service)
+                st.success("Successfully connected to Gmail and voice email handler is ready!") # Update message
+                st.rerun()
             else:
                 st.error("Failed to connect to Gmail. Please check credentials.json and ensure you have authorized the app.")
         except FileNotFoundError:
             st.error(f"Error: The credentials file ({config.GMAIL_CREDENTIALS_PATH}) was not found. Please make sure it's in the correct location.")
         except Exception as e:
             st.error(f"An unexpected error occurred during Gmail authentication: {e}")
-else:
+else: # Already connected
     st.success("✅ Connected to Gmail")
+    if st.session_state.gmail_service and not st.session_state.voice_email_handler:
+        st.session_state.voice_email_handler = VoiceEmailHandler(st.session_state.gmail_service)
+        # Optionally add a silent confirmation or small note if handler had to be re-initialized
+        print("VoiceEmailHandler re-initialized.")
     
     # Email Search
     search_query = st.text_input("Search query (e.g., from:sender@example.com is:unread)", key="gmail_search_query")

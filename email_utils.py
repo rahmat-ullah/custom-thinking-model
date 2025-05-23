@@ -1,6 +1,7 @@
 import os.path
 import base64
 import email
+from email.mime.text import MIMEText
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -9,7 +10,7 @@ from google.oauth2.credentials import Credentials
 import config
 
 # Define the SCOPES. If modifying these, delete the token.json file.
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 def authenticate_gmail():
     """Authenticates with the Gmail API using OAuth 2.0."""
@@ -98,6 +99,101 @@ def read_email(service, message_id, user_id='me'):
 
     except Exception as e:
         print(f"An error occurred while reading email {message_id}: {e!r}") # Use !r for detailed error
+        return None
+
+def reply_to_email(service, original_message_id, reply_body_text, user_id='me'):
+    """Creates and sends a reply to a given email message.
+
+    Args:
+        service: Authorized Gmail API service instance.
+        original_message_id: The ID of the message to reply to.
+        reply_body_text: The plain text content of the reply.
+        user_id: User's email address. The special value 'me'
+        can be used to indicate the authenticated user.
+
+    Returns:
+        The sent message object if successful, None otherwise.
+    """
+    try:
+        original_msg = service.users().messages().get(userId=user_id, id=original_message_id, format='metadata', metadataHeaders=['Subject', 'From', 'To', 'Cc', 'Message-ID', 'References']).execute()
+        
+        original_headers = original_msg['payload']['headers']
+        original_subject = next((h['value'] for h in original_headers if h['name'].lower() == 'subject'), '')
+        original_from = next((h['value'] for h in original_headers if h['name'].lower() == 'from'), '')
+        original_to = next((h['value'] for h in original_headers if h['name'].lower() == 'to'), '')
+        original_message_id_header = next((h['value'] for h in original_headers if h['name'].lower() == 'message-id'), '')
+
+        reply_subject = original_subject
+        if not reply_subject.lower().startswith("re:"):
+            reply_subject = "Re: " + reply_subject
+
+        # Determine the recipient of the reply
+        # Typically, you reply to the address in the 'From' header of the original email.
+        # If the original email was sent by the current user, they might be replying to 'To'
+        # This logic can be complex depending on 'Reply-To' headers, etc.
+        # For simplicity, we'll reply to the original sender.
+        reply_to_address = original_from
+
+        message = MIMEText(reply_body_text)
+        message['to'] = reply_to_address
+        # message['from'] = # Gmail automatically sets the from address to the authenticated user.
+        message['subject'] = reply_subject
+        message['In-Reply-To'] = original_message_id_header
+        message['References'] = next((h['value'] for h in original_headers if h['name'].lower() == 'references'), '')
+        if message['References']: # Add original message id to references if they exist
+             message['References'] += f" {original_message_id_header}"
+        else: # Start references with original message id
+             message['References'] = original_message_id_header
+
+
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        body = {'raw': raw_message, 'threadId': original_msg['threadId']}
+        
+        sent_message = service.users().messages().send(userId=user_id, body=body).execute()
+        print(f"Reply sent. Message ID: {sent_message['id']}")
+        return sent_message
+    except Exception as e:
+        print(f"An error occurred while sending reply: {e}")
+        return None
+
+def mark_email_as_read(service, message_id, user_id='me'):
+    """Marks a specific email as read by removing the 'UNREAD' label.
+
+    Args:
+        service: Authorized Gmail API service instance.
+        message_id: The ID of the message to mark as read.
+        user_id: User's email address. The special value 'me'
+        can be used to indicate the authenticated user.
+    Returns:
+        The modified message object if successful, None otherwise.
+    """
+    try:
+        body = {'removeLabelIds': ['UNREAD']}
+        message = service.users().messages().modify(userId=user_id, id=message_id, body=body).execute()
+        print(f"Message {message_id} marked as read.")
+        return message
+    except Exception as e:
+        print(f"An error occurred while marking email as read: {e}")
+        return None
+
+def mark_email_as_unread(service, message_id, user_id='me'):
+    """Marks a specific email as unread by adding the 'UNREAD' label.
+
+    Args:
+        service: Authorized Gmail API service instance.
+        message_id: The ID of the message to mark as unread.
+        user_id: User's email address. The special value 'me'
+        can be used to indicate the authenticated user.
+    Returns:
+        The modified message object if successful, None otherwise.
+    """
+    try:
+        body = {'addLabelIds': ['UNREAD']}
+        message = service.users().messages().modify(userId=user_id, id=message_id, body=body).execute()
+        print(f"Message {message_id} marked as unread.")
+        return message
+    except Exception as e:
+        print(f"An error occurred while marking email as unread: {e}")
         return None
 
 if __name__ == '__main__':
