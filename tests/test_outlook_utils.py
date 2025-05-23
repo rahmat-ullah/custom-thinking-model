@@ -80,7 +80,8 @@ class TestOutlookService(unittest.TestCase):
         mock_app_instance.acquire_token_by_device_flow.return_value = mock_token_result
 
         with patch.dict(os.environ, mock_env_vars): # Ensure env vars for constructor
-            service = OutlookService()
+            # Explicitly pass client_id and tenant_id, even if defaults would be picked up from mock_env_vars
+            service = OutlookService(client_id=mock_env_vars["OUTLOOK_CLIENT_ID"], tenant_id=mock_env_vars["OUTLOOK_TENANT_ID"])
 
         mock_app_instance.get_accounts.assert_called_once()
         mock_app_instance.initiate_device_flow.assert_called_once_with(scopes=["https://graph.microsoft.com/.default"])
@@ -104,7 +105,7 @@ class TestOutlookService(unittest.TestCase):
         mock_app_instance.acquire_token_silent.return_value = mock_token_result
 
         with patch.dict(os.environ, mock_env_vars):
-            service = OutlookService()
+            service = OutlookService(client_id=mock_env_vars["OUTLOOK_CLIENT_ID"], tenant_id=mock_env_vars["OUTLOOK_TENANT_ID"])
 
         mock_app_instance.get_accounts.assert_called_once()
         mock_app_instance.acquire_token_silent.assert_called_once_with(scopes=["https://graph.microsoft.com/.default"], account=mock_account)
@@ -124,7 +125,7 @@ class TestOutlookService(unittest.TestCase):
 
         with patch.dict(os.environ, mock_env_vars):
             with self.assertRaisesRegex(Exception, "Authentication failed: auth_failed, User cancelled."):
-                OutlookService()
+                OutlookService(client_id=mock_env_vars["OUTLOOK_CLIENT_ID"], tenant_id=mock_env_vars["OUTLOOK_TENANT_ID"])
     
     @patch('outlook_utils.PublicClientApplication')
     def test_auth_flow_initiate_device_flow_failure(self, MockPublicClientApplication):
@@ -135,15 +136,21 @@ class TestOutlookService(unittest.TestCase):
         
         with patch.dict(os.environ, mock_env_vars):
             with self.assertRaisesRegex(ValueError, "Failed to create device flow"):
-                OutlookService()
+                OutlookService(client_id=mock_env_vars["OUTLOOK_CLIENT_ID"], tenant_id=mock_env_vars["OUTLOOK_TENANT_ID"])
 
     def _setup_mock_service_with_graph_client(self):
-        """Helper to create a service instance with a mocked graph_client."""
-        service = OutlookService.__new__(OutlookService) # Create instance without calling __init__
+        """
+        Helper to create a service instance with a mocked graph_client.
+        This bypasses __init__ and _auth_flow, directly setting up what's needed for API call tests.
+        """
+        service = OutlookService.__new__(OutlookService) 
         service.client_id = mock_env_vars["OUTLOOK_CLIENT_ID"]
-        service.authority = f"https://login.microsoftonline.com/{mock_env_vars['OUTLOOK_TENANT_ID']}"
+        service.tenant_id = mock_env_vars["OUTLOOK_TENANT_ID"] # Explicitly set tenant_id
+        service.authority = f"https://login.microsoftonline.com/{service.tenant_id}" # Reconstruct authority based on set tenant_id
         service.scopes = ["https://graph.microsoft.com/.default"]
         service.graph_client = MagicMock()
+        # service.app would not be initialized here, as _auth_flow is bypassed.
+        # This is acceptable if tests using this helper don't rely on self.app.
         return service
 
     def test_list_emails_success_unread_only(self):

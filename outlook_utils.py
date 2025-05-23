@@ -1,7 +1,7 @@
 import logging
 import os
 from msal import ConfidentialClientApplication, PublicClientApplication
-from msgraph import GraphServiceClient
+from msgraph.generated.graph_service_client import GraphServiceClient
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.item_body import ItemBody
 from msgraph.generated.models.body_type import BodyType
@@ -10,43 +10,59 @@ from msgraph.generated.models.email_address import EmailAddress
 
 # Configuration placeholders (similar to config.py)
 # These should be set in a config file or environment variables
-CLIENT_ID = os.environ.get("OUTLOOK_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("OUTLOOK_CLIENT_SECRET")  # For ConfidentialClientApplication
-TENANT_ID = os.environ.get("OUTLOOK_TENANT_ID")
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES = ["https://graph.microsoft.com/.default"] # Or more specific scopes like "Mail.ReadWrite", "Mail.Send"
+DEFAULT_CLIENT_ID = os.environ.get("OUTLOOK_CLIENT_ID")
+DEFAULT_CLIENT_SECRET = os.environ.get("OUTLOOK_CLIENT_SECRET")  # For ConfidentialClientApplication
+DEFAULT_TENANT_ID = os.environ.get("OUTLOOK_TENANT_ID") # Default tenant_id from environment
+DEFAULT_SCOPES = ["https://graph.microsoft.com/.default"] # Or more specific scopes like "Mail.ReadWrite", "Mail.Send"
 
 # Logging setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class OutlookService:
-    def __init__(self, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, authority=AUTHORITY, scopes=SCOPES):
+    def __init__(self, client_id: str = DEFAULT_CLIENT_ID, 
+                 tenant_id: str = DEFAULT_TENANT_ID, 
+                 client_secret: str = None, # Optional, mainly for confidential clients
+                 scopes: list = None):
+        
+        if not client_id:
+            raise ValueError("Outlook client_id is required.")
+        if not tenant_id:
+            raise ValueError("Outlook tenant_id is required.")
+
         self.client_id = client_id
-        self.client_secret = client_secret # Required for web apps or service accounts
-        self.authority = authority
-        self.scopes = scopes
+        self.tenant_id = tenant_id
+        # Use provided client_secret or default from env (though PublicClientApplication usually doesn't use it)
+        self.client_secret = client_secret if client_secret is not None else DEFAULT_CLIENT_SECRET
+        
+        self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+        self.scopes = scopes if scopes is not None else DEFAULT_SCOPES
+        
         self.graph_client = None
+        self.last_device_flow_details = None # Store device flow details if that path is taken
+        
+        # Initialize PublicClientApplication in __init__
+        # Using PublicClientApplication for device flow or interactive auth.
+        # Suitable for scenarios where a user can interactively sign in.
+        # For background services or web applications, ConfidentialClientApplication is more appropriate
+        # and would typically use self.client_secret.
+        self.app = PublicClientApplication(
+            client_id=self.client_id,
+            authority=self.authority,
+            # token_cache= # Optional: configure a token cache for persistence if desired
+        )
+        
         self._auth_flow()
 
     def _auth_flow(self):
         """
         Authenticates with Microsoft Graph API using MSAL.
         Tries to load existing tokens, otherwise initiates device flow or interactive flow.
+        self.app (PublicClientApplication instance) must be initialized before calling this.
         For server-to-server auth (e.g. a daemon app), ConfidentialClientApplication with client secret or certificate is preferred.
         """
-        # Using PublicClientApplication for device flow or interactive auth.
-        # Suitable for scenarios where a user can interactively sign in.
-        # For background services or web applications, ConfidentialClientApplication is more appropriate.
-        # self.app = ConfidentialClientApplication(
-        #     client_id=self.client_id,
-        #     authority=self.authority,
-        #     client_credential=self.client_secret,
-        # )
-        self.app = PublicClientApplication(
-            client_id=self.client_id,
-            authority=self.authority,
-        )
+        if not self.app:
+            raise RuntimeError("MSAL PublicClientApplication not initialized. Call __init__ first.")
 
         accounts = self.app.get_accounts()
         result = None
