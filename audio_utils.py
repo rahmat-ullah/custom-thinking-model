@@ -30,8 +30,8 @@ def listen_to_user():
         print(f"An unknown error occurred during speech recognition: {e}")
         return ""
 
-def speak_text(text):
-    """Converts the given text into speech using OpenAI Text-to-Speech and plays it with Pygame."""
+def speak_text(text, voice_id="alloy"): # Added voice_id parameter with default "alloy"
+    """Converts the given text into speech using OpenAI Text-to-Speech with a selectable voice and plays it with Pygame."""
     if not text:
         print("No text provided to speak.")
         return
@@ -50,10 +50,10 @@ def speak_text(text):
 
         client = OpenAI(api_key=config.OPENAI_API_KEY)
         
-        print(f"Synthesizing speech with OpenAI TTS for: \"{text}\"")
+        print(f"Synthesizing speech with OpenAI TTS (voice: {voice_id}) for: \"{text}\"")
         response = client.audio.speech.create(
             model="tts-1",  # Standard model
-            voice="alloy",  # Example voice
+            voice=voice_id,  # Use the voice_id parameter
             input=text,
             response_format="mp3"
         )
@@ -89,14 +89,26 @@ if __name__ == '__main__':
     except pygame.error as pg_err:
         print(f"Failed to initialize pygame.mixer for test script: {pg_err}. TTS playback will fail.")
 
-    # Test 1: Basic TTS functionality
-    print("\n--- Test 1: Basic OpenAI TTS ---")
-    test_text_1 = "Hello, this is a test of the new OpenAI Text to Speech with Pygame."
+    # Test 1: Basic TTS functionality (using default voice "alloy")
+    print("\n--- Test 1: Basic OpenAI TTS (default voice 'alloy') ---")
+    test_text_1 = "Hello, this is a test with the default alloy voice."
     print(f"Attempting to speak: \"{test_text_1}\"")
-    speak_text(test_text_1)
+    speak_text(test_text_1) # Uses default voice
 
-    # Test 2: TTS with recognized speech (if listen_to_user works independently)
-    print("\n--- Test 2: Speech Recognition and OpenAI TTS ---")
+    # Test 1b: Different voice - "nova"
+    print("\n--- Test 1b: OpenAI TTS with 'nova' voice ---")
+    test_text_nova = "This is a test using the nova voice."
+    print(f"Attempting to speak: \"{test_text_nova}\" with voice 'nova'")
+    speak_text(test_text_nova, voice_id="nova")
+    
+    # Test 1c: Different voice - "shimmer"
+    print("\n--- Test 1c: OpenAI TTS with 'shimmer' voice ---")
+    test_text_shimmer = "And this is a test with the shimmer voice."
+    print(f"Attempting to speak: \"{test_text_shimmer}\" with voice 'shimmer'")
+    speak_text(test_text_shimmer, voice_id="shimmer")
+
+    # Test 2: TTS with recognized speech (using a specific voice, e.g., "echo")
+    print("\n--- Test 2: Speech Recognition and OpenAI TTS (voice 'echo') ---")
     print("Testing speech-to-text (listening for a few seconds)...")
     # Assuming listen_to_user remains functional and doesn't depend on TTS choice
     user_speech = listen_to_user() 
@@ -104,22 +116,22 @@ if __name__ == '__main__':
     if user_speech:
         print(f"Recognized speech: \"{user_speech}\"")
         tts_response = f"You said: {user_speech}"
-        print(f"Attempting to speak with OpenAI TTS: \"{tts_response}\"")
-        speak_text(tts_response)
+        print(f"Attempting to speak with OpenAI TTS (voice 'echo'): \"{tts_response}\"")
+        speak_text(tts_response, voice_id="echo") # Example: using 'echo' voice for response
     else:
         no_speech_message = "I could not understand what you said, or no audio was detected during the test."
         print(no_speech_message)
-        speak_text(no_speech_message)
+        speak_text(no_speech_message, voice_id="onyx") # Example: using 'onyx' for this message
 
-    # Test 3: Handling of empty string
+    # Test 3: Handling of empty string (should not depend on voice_id)
     print("\n--- Test 3: Empty string input ---")
-    speak_text("") # Should print "No text provided to speak." and return.
+    speak_text("", voice_id="nova") # Voice_id is irrelevant here, but test it doesn't break
 
-    # Test 4: Longer text
-    print("\n--- Test 4: Longer text input with OpenAI TTS ---")
-    test_text_2 = "This is a slightly longer sentence for OpenAI TTS to process, ensuring that playback handles it well."
+    # Test 4: Longer text (using default voice)
+    print("\n--- Test 4: Longer text input with OpenAI TTS (default voice) ---")
+    test_text_2 = "This is a slightly longer sentence for OpenAI Text to Speech to process, ensuring that playback handles it well using the default voice."
     print(f"Attempting to speak: \"{test_text_2}\"")
-    speak_text(test_text_2)
+    speak_text(test_text_2) # Uses default "alloy"
 
     # Clean up pygame.mixer.
     if pygame.mixer.get_init():

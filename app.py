@@ -39,6 +39,12 @@ if "waiting_for_reply_body" not in st.session_state: # For multi-turn reply (voi
    st.session_state.waiting_for_reply_body = False
 if "waiting_for_text_reply_body" not in st.session_state: # For multi-turn reply (text)
     st.session_state.waiting_for_text_reply_body = False
+if "selected_tts_voice" not in st.session_state: # For OpenAI TTS Voice Selection
+    st.session_state.selected_tts_voice = "alloy" # Default voice
+
+
+# --- AVAILABLE TTS VOICES ---
+AVAILABLE_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 
 
 # --- MODIFIED/NEW FUNCTIONS ---
@@ -66,11 +72,11 @@ def process_general_llm_input(user_input_text: str, called_from_voice: bool):
     if st.session_state.talking_mode_enabled and called_from_voice:
         # Per issue: "In voice mode it shouldn't use thinking chat mode."
         # So, for non-email commands processed via voice, use DirectChat response.
-        audio_utils.speak_text(direct_response)
+        audio_utils.speak_text(direct_response, voice_id=st.session_state.selected_tts_voice)
     elif st.session_state.talking_mode_enabled and not called_from_voice:
         # This is for text input submitted while talking mode is on.
         # Original behavior was to speak both. Let's keep DirectChat for consistency in voice.
-         audio_utils.speak_text(direct_response) # Or let user choose? For now, stick to direct for voice.
+         audio_utils.speak_text(direct_response, voice_id=st.session_state.selected_tts_voice)
 
     st.session_state.user_input = ""
 
@@ -168,7 +174,7 @@ def process_voice_command(recognized_text: str):
 
     if email_command_handled:
         if response_text:
-            audio_utils.speak_text(response_text)
+            audio_utils.speak_text(response_text, voice_id=st.session_state.selected_tts_voice)
         # Log this interaction
         if config.ENABLE_LOGGING and recognized_text and response_text : # ensure values exist
             log_entry = {
@@ -314,7 +320,7 @@ def handle_submit(): # This is for text based submission
             st.session_state.direct_chat.add_message("assistant", email_response_text)
 
             if st.session_state.talking_mode_enabled:
-                audio_utils.speak_text(email_response_text)
+                audio_utils.speak_text(email_response_text, voice_id=st.session_state.selected_tts_voice)
             
             st.session_state.user_input = "" # Clear input box
             # Log this interaction if needed (similar to how process_voice_command logs)
@@ -354,6 +360,14 @@ st.session_state.talking_mode_enabled = st.sidebar.checkbox(
 
 if st.session_state.talking_mode_enabled:
     st.sidebar.caption("Note: The assistant's voice is AI-generated.") # AI Voice Disclosure
+    
+    # Voice Selection UI
+    st.sidebar.selectbox(
+        "Choose Assistant Voice:",
+        options=AVAILABLE_TTS_VOICES,
+        key="selected_tts_voice" # This directly updates st.session_state.selected_tts_voice
+    )
+
     if st.sidebar.button("🎤 Speak"):
         handle_mic_input()
     st.sidebar.caption("Click 'Speak' then talk. Your message will appear in the input box below and be processed.")
