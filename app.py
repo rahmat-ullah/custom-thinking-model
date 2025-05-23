@@ -353,6 +353,7 @@ st.session_state.talking_mode_enabled = st.sidebar.checkbox(
 )
 
 if st.session_state.talking_mode_enabled:
+    st.sidebar.caption("Note: The assistant's voice is AI-generated.") # AI Voice Disclosure
     if st.sidebar.button("🎤 Speak"):
         handle_mic_input()
     st.sidebar.caption("Click 'Speak' then talk. Your message will appear in the input box below and be processed.")
