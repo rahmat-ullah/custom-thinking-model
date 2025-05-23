@@ -1,7 +1,7 @@
 import logging
 import os
 from msal import ConfidentialClientApplication, PublicClientApplication
-from msgraph.generated.graph_service_client import GraphServiceClient
+from msgraph import GraphServiceClient
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.item_body import ItemBody
 from msgraph.generated.models.body_type import BodyType

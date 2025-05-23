@@ -10,3 +10,8 @@ google-auth-httplib2
 google-auth-oauthlib
 pygame
 # openai is already listed, ensure it's up-to-date if necessary, but it's present.
+
+msal
+msgraph
+msgraph-core
+msgraph-sdk
