@@ -338,3 +338,194 @@ if __name__ == '__main__':
 # For now, print statements in tests help to see which test is running.
 # suite = unittest.TestLoader().loadTestsFromTestCase(TestEmailUtils)
 # unittest.TextTestRunner(verbosity=2).run(suite)
+
+    # --- Tests for new functions ---
+
+    @patch('email_utils.MIMEText') # Mock MIMEText to inspect its creation
+    def test_reply_to_email_success(self, MockMIMEText):
+        print("\nRunning test_reply_to_email_success")
+        mock_service = MagicMock()
+        original_message_id = "original_msg_id"
+        reply_body_text = "This is a test reply."
+        user_id = "test_user@example.com"
+
+        # Mock for service.users().messages().get()
+        mock_original_msg = {
+            'threadId': 'thread123',
+            'payload': {
+                'headers': [
+                    {'name': 'Subject', 'value': 'Original Subject'},
+                    {'name': 'From', 'value': 'sender@example.com'},
+                    {'name': 'To', 'value': user_id},
+                    {'name': 'Message-ID', 'value': '<original_msg_id_header@example.com>'},
+                    {'name': 'References', 'value': '<other_ref@example.com>'}
+                ]
+            }
+        }
+        mock_service.users().messages().get().execute.return_value = mock_original_msg
+
+        # Mock for service.users().messages().send()
+        mock_sent_msg = {'id': 'sent_reply_id'}
+        mock_service.users().messages().send().execute.return_value = mock_sent_msg
+        
+        # Mock MIMEText instance to check its properties
+        mock_mime_instance = MagicMock()
+        MockMIMEText.return_value = mock_mime_instance
+        # Simulate as_bytes().decode() for raw message creation
+        mock_mime_instance.as_bytes.return_value.decode.return_value = "encoded_raw_message_string"
+
+
+        sent_message = email_utils.reply_to_email(mock_service, original_message_id, reply_body_text, user_id)
+
+        mock_service.users().messages().get.assert_called_once_with(
+            userId=user_id, id=original_message_id, format='metadata', 
+            metadataHeaders=['Subject', 'From', 'To', 'Cc', 'Message-ID', 'References']
+        )
+        
+        MockMIMEText.assert_called_once_with(reply_body_text)
+        self.assertEqual(mock_mime_instance['to'], 'sender@example.com')
+        self.assertEqual(mock_mime_instance['subject'], 'Re: Original Subject')
+        self.assertEqual(mock_mime_instance['In-Reply-To'], '<original_msg_id_header@example.com>')
+        self.assertEqual(mock_mime_instance['References'], '<other_ref@example.com> <original_msg_id_header@example.com>')
+
+        expected_raw_body = {'raw': base64.urlsafe_b64encode(mock_mime_instance.as_bytes()).decode('utf-8'), 'threadId': 'thread123'}
+        # We need to capture the arguments to `send`
+        # The actual call to send().execute() is mocked, so we check the args to send()
+        # The body for send() is called with `body=expected_raw_body`
+        # So, `service.users().messages().send.assert_called_once_with(userId=user_id, body=expected_raw_body)`
+        args, kwargs = mock_service.users().messages().send.call_args
+        self.assertEqual(kwargs['userId'], user_id)
+        self.assertEqual(kwargs['body']['threadId'], 'thread123')
+        # The raw content can be tricky due to encoding, let's ensure 'raw' key exists
+        self.assertIn('raw', kwargs['body'])
+
+        self.assertEqual(sent_message, mock_sent_msg)
+
+    def test_reply_to_email_no_references_header(self):
+        print("\nRunning test_reply_to_email_no_references_header")
+        mock_service = MagicMock()
+        # ... (similar setup as test_reply_to_email_success but without 'References' in original_msg headers)
+        original_message_id = "original_msg_id_no_ref"
+        reply_body_text = "Reply to email with no prior references."
+        
+        mock_original_msg_no_ref = {
+            'threadId': 'thread456',
+            'payload': {
+                'headers': [
+                    {'name': 'Subject', 'value': 'Subject No Ref'},
+                    {'name': 'From', 'value': 'sender_no_ref@example.com'},
+                    {'name': 'Message-ID', 'value': '<original_msg_id_no_ref_header@example.com>'}
+                    # No 'References' header
+                ]
+            }
+        }
+        mock_service.users().messages().get().execute.return_value = mock_original_msg_no_ref
+        mock_service.users().messages().send().execute.return_value = {'id': 'sent_reply_id_no_ref'}
+
+        with patch('email_utils.MIMEText') as MockMIMETextNoRef:
+            mock_mime_instance_no_ref = MagicMock()
+            MockMIMETextNoRef.return_value = mock_mime_instance_no_ref
+            mock_mime_instance_no_ref.as_bytes.return_value.decode.return_value = "raw_msg_no_ref"
+
+            email_utils.reply_to_email(mock_service, original_message_id, reply_body_text)
+
+            self.assertEqual(mock_mime_instance_no_ref['References'], '<original_msg_id_no_ref_header@example.com>')
+
+
+    def test_reply_to_email_subject_already_re(self):
+        print("\nRunning test_reply_to_email_subject_already_re")
+        mock_service = MagicMock()
+        # ... (similar setup but original subject starts with "Re:")
+        original_message_id = "original_msg_id_re"
+        reply_body_text = "Reply to an existing reply."
+        
+        mock_original_msg_re = {
+            'threadId': 'thread789',
+            'payload': {
+                'headers': [
+                    {'name': 'Subject', 'value': 'Re: Original Subject'}, # Already has Re:
+                    {'name': 'From', 'value': 'sender_re@example.com'},
+                    {'name': 'Message-ID', 'value': '<original_msg_id_re_header@example.com>'}
+                ]
+            }
+        }
+        mock_service.users().messages().get().execute.return_value = mock_original_msg_re
+        mock_service.users().messages().send().execute.return_value = {'id': 'sent_reply_id_re'}
+
+        with patch('email_utils.MIMEText') as MockMIMETextRe:
+            mock_mime_instance_re = MagicMock()
+            MockMIMETextRe.return_value = mock_mime_instance_re
+            mock_mime_instance_re.as_bytes.return_value.decode.return_value = "raw_msg_re"
+
+            email_utils.reply_to_email(mock_service, original_message_id, reply_body_text)
+            self.assertEqual(mock_mime_instance_re['subject'], 'Re: Original Subject') # Should not add another "Re:"
+
+
+    def test_mark_email_as_read_success(self):
+        print("\nRunning test_mark_email_as_read_success")
+        mock_service = MagicMock()
+        message_id = "msg_to_read"
+        user_id = "user_read@example.com"
+
+        mock_modified_msg = {'id': message_id, 'labelIds': ['INBOX', 'IMPORTANT']} # Example response
+        mock_service.users().messages().modify().execute.return_value = mock_modified_msg
+
+        result = email_utils.mark_email_as_read(mock_service, message_id, user_id)
+
+        expected_body = {'removeLabelIds': ['UNREAD']}
+        mock_service.users().messages().modify.assert_called_once_with(
+            userId=user_id, id=message_id, body=expected_body
+        )
+        self.assertEqual(result, mock_modified_msg)
+
+    def test_mark_email_as_unread_success(self):
+        print("\nRunning test_mark_email_as_unread_success")
+        mock_service = MagicMock()
+        message_id = "msg_to_unread"
+        user_id = "user_unread@example.com"
+
+        mock_modified_msg = {'id': message_id, 'labelIds': ['INBOX', 'UNREAD']} # Example response
+        mock_service.users().messages().modify().execute.return_value = mock_modified_msg
+
+        result = email_utils.mark_email_as_unread(mock_service, message_id, user_id)
+
+        expected_body = {'addLabelIds': ['UNREAD']}
+        mock_service.users().messages().modify.assert_called_once_with(
+            userId=user_id, id=message_id, body=expected_body
+        )
+        self.assertEqual(result, mock_modified_msg)
+
+    # Test for error handling (optional as per instructions, but good practice)
+    def test_reply_to_email_send_error(self):
+        print("\nRunning test_reply_to_email_send_error")
+        mock_service = MagicMock()
+        # Mock get() to return something minimal
+        mock_service.users().messages().get().execute.return_value = {
+            'threadId': 'error_thread', 'payload': {'headers': [{'name': 'Subject', 'value': 'Error Case'}]}
+        }
+        # Mock send() to raise an exception
+        mock_service.users().messages().send().execute.side_effect = Exception("Failed to send")
+
+        with patch('builtins.print') as mock_print: # Suppress print during test
+            result = email_utils.reply_to_email(mock_service, "id", "body")
+            self.assertIsNone(result)
+            mock_print.assert_any_call("An error occurred while sending reply: Failed to send")
+
+    def test_mark_email_as_read_error(self):
+        print("\nRunning test_mark_email_as_read_error")
+        mock_service = MagicMock()
+        mock_service.users().messages().modify().execute.side_effect = Exception("Failed to modify")
+        with patch('builtins.print') as mock_print:
+            result = email_utils.mark_email_as_read(mock_service, "id")
+            self.assertIsNone(result)
+            mock_print.assert_any_call("An error occurred while marking email as read: Failed to modify")
+
+    def test_mark_email_as_unread_error(self):
+        print("\nRunning test_mark_email_as_unread_error")
+        mock_service = MagicMock()
+        mock_service.users().messages().modify().execute.side_effect = Exception("Failed to modify unread")
+        with patch('builtins.print') as mock_print:
+            result = email_utils.mark_email_as_unread(mock_service, "id")
+            self.assertIsNone(result)
+            mock_print.assert_any_call("An error occurred while marking email as unread: Failed to modify unread")
+
